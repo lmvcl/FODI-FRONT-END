@@ -1400,7 +1400,7 @@ function getAudioConfig(observer, data, offset, audioCodec) {
     }
   }
   /* refer to http://wiki.multimedia.cx/index.php?title=MPEG-4_Audio#Audio_Specific_Config
-      ISO 14496-3 (AAC).pdf - Table 1.13 — Syntax of AudioSpecificConfig()
+      ISO 14496-3 (AAC).pdf - Table 1.13 鈥?Syntax of AudioSpecificConfig()
     Audio Profile / Audio Object Type
     0: Null
     1: AAC Main
@@ -1484,12 +1484,17 @@ function adts_probe(data, offset) {
   // or end of data is reached
   if (isHeader(data, offset)) {
     // ADTS header Length
-    var headerLength = getHeaderLength(data, offset); // ADTS frame Length
+    var headerLength = getHeaderLength(data, offset);
 
-    var frameLength = headerLength;
+    if (offset + headerLength >= data.length) {
+      return false;
+    } // ADTS frame Length
 
-    if (offset + 5 < data.length) {
-      frameLength = getFullFrameLength(data, offset);
+
+    var frameLength = getFullFrameLength(data, offset);
+
+    if (frameLength <= headerLength) {
+      return false;
     }
 
     var newOffset = offset + frameLength;
@@ -2376,6 +2381,7 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
     this.typeSupported = typeSupported;
     this.remuxer = remuxer;
     this.sampleAes = null;
+    this.pmtUnknownTypes = {};
   }
 
   var _proto = TSDemuxer.prototype;
@@ -2456,6 +2462,7 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
   _proto.resetInitSegment = function resetInitSegment(initSegment, audioCodec, videoCodec, duration) {
     this.pmtParsed = false;
     this._pmtId = -1;
+    this.pmtUnknownTypes = {};
     this._avcTrack = TSDemuxer.createTrack('video', duration);
     this._audioTrack = TSDemuxer.createTrack('audio', duration);
     this._id3Track = TSDemuxer.createTrack('id3', duration);
@@ -2486,6 +2493,7 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
         offset,
         pes,
         unknownPIDs = false;
+    this.pmtUnknownTypes = {};
     this.contiguous = contiguous;
 
     var pmtParsed = this.pmtParsed,
@@ -2500,7 +2508,7 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
         audioData = audioTrack.pesData,
         id3Data = id3Track.pesData,
         parsePAT = this._parsePAT,
-        parsePMT = this._parsePMT,
+        parsePMT = this._parsePMT.bind(this),
         parsePES = this._parsePES,
         parseAVCPES = this._parseAVCPES.bind(this),
         parseAACPES = this._parseAACPES.bind(this),
@@ -2731,6 +2739,21 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
     return (data[offset + 10] & 0x1F) << 8 | data[offset + 11]; // logger.log('PMT PID:'  + this._pmtId);
   };
 
+  _proto._trackUnknownPmt = function _trackUnknownPmt(type, logLevel, message) {
+    // Only log unknown and unsupported stream types once per append or stream (by resetting this.pmtUnknownTypes)
+    // For more information on elementary stream types see:
+    // https://en.wikipedia.org/wiki/Program-specific_information#Elementary_stream_types
+    var result = this.pmtUnknownTypes[type] || 0;
+
+    if (result === 0) {
+      this.pmtUnknownTypes[type] = 0;
+      logLevel.call(logger["logger"], message);
+    }
+
+    this.pmtUnknownTypes[type]++;
+    return result;
+  };
+
   _proto._parsePMT = function _parsePMT(data, offset, mpegSupported, isSampleAes) {
     var sectionLength,
         tableEnd,
@@ -2757,7 +2780,8 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
         case 0xcf:
           // SAMPLE-AES AAC
           if (!isSampleAes) {
-            logger["logger"].log('unknown stream type:' + data[offset]);
+            this._trackUnknownPmt(data[offset], logger["logger"].warn, 'ADTS AAC with AES-128-CBC frame encryption found in unencrypted stream');
+
             break;
           }
 
@@ -2784,7 +2808,8 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
         case 0xdb:
           // SAMPLE-AES AVC
           if (!isSampleAes) {
-            logger["logger"].log('unknown stream type:' + data[offset]);
+            this._trackUnknownPmt(data[offset], logger["logger"].warn, 'H.264 with AES-128-CBC slice encryption found in unencrypted stream');
+
             break;
           }
 
@@ -2805,7 +2830,7 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
         case 0x04:
           // logger.log('MPEG PID:'  + pid);
           if (!mpegSupported) {
-            logger["logger"].log('MPEG audio found, not supported in this browser for now');
+            this._trackUnknownPmt(data[offset], logger["logger"].warn, 'MPEG audio found, not supported in this browser');
           } else if (result.audio === -1) {
             result.audio = pid;
             result.isAAC = false;
@@ -2814,11 +2839,13 @@ var tsdemuxer_TSDemuxer = /*#__PURE__*/function () {
           break;
 
         case 0x24:
-          logger["logger"].warn('HEVC stream type found, not supported for now');
+          this._trackUnknownPmt(data[offset], logger["logger"].warn, 'Unsupported HEVC stream type found');
+
           break;
 
         default:
-          logger["logger"].log('unknown stream type:' + data[offset]);
+          this._trackUnknownPmt(data[offset], logger["logger"].log, 'Unknown stream type:' + data[offset]);
+
           break;
       } // move to the next table entry
       // skip past the elementary stream descriptors, if present
@@ -4841,7 +4868,7 @@ var mp4_remuxer_MP4Remuxer = /*#__PURE__*/function () {
         // 3: currentTime (aka nextPtsNorm) is not 0
         else if (delta >= maxAudioFramesDrift * inputSampleDuration && delta < MAX_SILENT_FRAME_DURATION_90KHZ && nextPts) {
             var missing = Math.round(delta / inputSampleDuration);
-            logger["logger"].warn("Injecting " + missing + " audio frames @ " + toMsFromMpegTsClock(nextPts, true) + " ms due to " + toMsFromMpegTsClock(nextPts, true) + " ms gap.");
+            logger["logger"].warn("Injecting " + missing + " audio frames @ " + toMsFromMpegTsClock(nextPts, true) + " ms due to " + toMsFromMpegTsClock(delta, true) + " ms gap.");
 
             for (var j = 0; j < missing; j++) {
               var newStamp = Math.max(nextPts, 0);
@@ -9807,7 +9834,7 @@ function fragment_finders_fragmentWithinToleranceTest(bufferEnd, maxFragLookUpTo
   // offset should be within fragment boundary - config.maxFragLookUpTolerance
   // this is to cope with situations like
   // bufferEnd = 9.991
-  // frag[Ø] : [0,10]
+  // frag[脴] : [0,10]
   // frag[1] : [10,20]
   // bufferEnd is within frag[0] range ... although what we are expecting is to return frag[1] here
   //              frag start               frag start+duration
@@ -10025,7 +10052,7 @@ var gap_controller_GapController = /*#__PURE__*/function () {
     if (!stallReported) {
       // Report stalled error once
       this.stallReported = true;
-      logger["logger"].warn("Playback stalling at @" + media.currentTime + " due to low buffer");
+      logger["logger"].warn("Playback stalling at @" + media.currentTime + " due to low buffer (buffer=" + bufferLen + ")");
       hls.trigger(events["default"].ERROR, {
         type: errors["ErrorTypes"].MEDIA_ERROR,
         details: errors["ErrorDetails"].BUFFER_STALLED_ERROR,
@@ -10631,8 +10658,9 @@ var stream_controller_StreamController = /*#__PURE__*/function (_BaseStreamContr
     maxBufLen = Math.min(maxBufLen, config.maxMaxBufferLength); // determine next candidate fragment to be loaded, based on current position and end of buffer position
     // ensure up to `config.maxMaxBufferLength` of buffer upfront
 
-    var bufferInfo = BufferHelper.bufferInfo(this.mediaBuffer ? this.mediaBuffer : media, pos, config.maxBufferHole),
-        bufferLen = bufferInfo.len; // Stay idle if we are still with buffer margins
+    var maxBufferHole = pos < config.maxBufferHole ? Math.max(MAX_START_GAP_JUMP, config.maxBufferHole) : config.maxBufferHole;
+    var bufferInfo = BufferHelper.bufferInfo(this.mediaBuffer ? this.mediaBuffer : media, pos, maxBufferHole);
+    var bufferLen = bufferInfo.len; // Stay idle if we are still with buffer margins
 
     if (bufferLen >= maxBufLen) {
       return;
@@ -12908,8 +12936,7 @@ var abr_controller_AbrController = /*#__PURE__*/function (_EventHandler) {
       return;
     }
 
-    var loader = frag.loader;
-    var minAutoLevel = hls.minAutoLevel; // if loader has been destroyed or loading has been aborted, stop timer and return
+    var loader = frag.loader; // if loader has been destroyed or loading has been aborted, stop timer and return
 
     if (!loader || loader.stats && loader.stats.aborted) {
       logger["logger"].warn('frag loader destroy or aborted, disarm abandonRules');
@@ -12933,6 +12960,11 @@ var abr_controller_AbrController = /*#__PURE__*/function (_EventHandler) {
         // compute expected fragment length using frag duration and level bitrate. also ensure that expected len is gte than already loaded size
 
         var level = levels[frag.level];
+
+        if (!level) {
+          return;
+        }
+
         var levelBitrate = level.realBitrate ? Math.max(level.realBitrate, level.bitrate) : level.bitrate;
         var expectedLen = stats.total ? stats.total : Math.max(stats.loaded, Math.round(frag.duration * levelBitrate / 8));
         var pos = video.currentTime;
@@ -12942,6 +12974,7 @@ var abr_controller_AbrController = /*#__PURE__*/function (_EventHandler) {
         // ie if we risk buffer starvation if bw does not increase quickly
 
         if (bufferStarvationDelay < 2 * frag.duration / playbackRate && fragLoadedDelay > bufferStarvationDelay) {
+          var minAutoLevel = hls.minAutoLevel;
           var fragLevelNextLoadedDelay;
           var nextLoadLevel; // lets iterate through lower level and try to find the biggest one that could avoid rebuffering
           // we start from current level - 1 and we step down , until we find a matching level
@@ -14315,9 +14348,6 @@ var fps_controller_FPSController = /*#__PURE__*/function (_EventHandler) {
  * XHR based logger
 */
 
-var xhr_loader_window = window,
-    xhr_loader_performance = xhr_loader_window.performance,
-    xhr_loader_XMLHttpRequest = xhr_loader_window.XMLHttpRequest;
 
 var xhr_loader_XhrLoader = /*#__PURE__*/function () {
   function XhrLoader(config) {
@@ -14352,7 +14382,7 @@ var xhr_loader_XhrLoader = /*#__PURE__*/function () {
     this.config = config;
     this.callbacks = callbacks;
     this.stats = {
-      trequest: xhr_loader_performance.now(),
+      trequest: window.performance.now(),
       retry: 0
     };
     this.retryDelay = config.retryDelay;
@@ -14362,7 +14392,7 @@ var xhr_loader_XhrLoader = /*#__PURE__*/function () {
   _proto.loadInternal = function loadInternal() {
     var xhr,
         context = this.context;
-    xhr = this.loader = new xhr_loader_XMLHttpRequest();
+    xhr = this.loader = new window.XMLHttpRequest();
     var stats = this.stats;
     stats.tfirst = 0;
     stats.loaded = 0;
@@ -14421,14 +14451,14 @@ var xhr_loader_XhrLoader = /*#__PURE__*/function () {
       window.clearTimeout(this.requestTimeout);
 
       if (stats.tfirst === 0) {
-        stats.tfirst = Math.max(xhr_loader_performance.now(), stats.trequest);
+        stats.tfirst = Math.max(window.performance.now(), stats.trequest);
       }
 
       if (readyState === 4) {
         var status = xhr.status; // http status between 200 to 299 are all successful
 
         if (status >= 200 && status < 300) {
-          stats.tload = Math.max(stats.tfirst, xhr_loader_performance.now());
+          stats.tload = Math.max(stats.tfirst, window.performance.now());
           var data, len;
 
           if (context.responseType === 'arraybuffer') {
@@ -14988,6 +15018,7 @@ function audio_stream_controller_inheritsLoose(subClass, superClass) { subClass.
 
 
 
+
 var audio_stream_controller_window = window,
     audio_stream_controller_performance = audio_stream_controller_window.performance;
 var audio_stream_controller_TICK_INTERVAL = 100; // how often to tick in ms
@@ -15102,20 +15133,21 @@ var audio_stream_controller_AudioStreamController = /*#__PURE__*/function (_Base
           }
         }
 
-        var media = this.mediaBuffer ? this.mediaBuffer : this.media,
-            videoBuffer = this.videoBuffer ? this.videoBuffer : this.media,
-            bufferInfo = BufferHelper.bufferInfo(media, pos, config.maxBufferHole),
-            mainBufferInfo = BufferHelper.bufferInfo(videoBuffer, pos, config.maxBufferHole),
-            bufferLen = bufferInfo.len,
-            bufferEnd = bufferInfo.end,
-            fragPrevious = this.fragPrevious,
-            // ensure we buffer at least config.maxBufferLength (default 30s) or config.maxMaxBufferLength (default: 600s)
+        var media = this.mediaBuffer ? this.mediaBuffer : this.media;
+        var videoBuffer = this.videoBuffer ? this.videoBuffer : this.media;
+        var maxBufferHole = pos < config.maxBufferHole ? Math.max(MAX_START_GAP_JUMP, config.maxBufferHole) : config.maxBufferHole;
+        var bufferInfo = BufferHelper.bufferInfo(media, pos, maxBufferHole);
+        var mainBufferInfo = BufferHelper.bufferInfo(videoBuffer, pos, maxBufferHole);
+        var bufferLen = bufferInfo.len;
+        var bufferEnd = bufferInfo.end;
+        var fragPrevious = this.fragPrevious; // ensure we buffer at least config.maxBufferLength (default 30s) or config.maxMaxBufferLength (default: 600s)
         // whichever is smaller.
         // once we reach that threshold, don't buffer more than video (mainBufferInfo.len)
-        maxConfigBuffer = Math.min(config.maxBufferLength, config.maxMaxBufferLength),
-            maxBufLen = Math.max(maxConfigBuffer, mainBufferInfo.len),
-            audioSwitch = this.audioSwitch,
-            trackId = this.trackId; // if buffer length is less than maxBufLen try to load a new fragment
+
+        var maxConfigBuffer = Math.min(config.maxBufferLength, config.maxMaxBufferLength);
+        var maxBufLen = Math.max(maxConfigBuffer, mainBufferInfo.len);
+        var audioSwitch = this.audioSwitch;
+        var trackId = this.trackId; // if buffer length is less than maxBufLen try to load a new fragment
 
         if ((bufferLen < maxBufLen || audioSwitch) && trackId < tracks.length) {
           trackDetails = tracks[trackId].details; // if track info not retrieved yet, switch state and wait for track retrieval
@@ -15188,7 +15220,7 @@ var audio_stream_controller_AudioStreamController = /*#__PURE__*/function (_Base
                 // offset should be within fragment boundary - config.maxFragLookUpTolerance
                 // this is to cope with situations like
                 // bufferEnd = 9.991
-                // frag[Ø] : [0,10]
+                // frag[脴] : [0,10]
                 // frag[1] : [10,20]
                 // bufferEnd is within frag[0] range ... although what we are expecting is to return frag[1] here
                 //              frag start               frag start+duration
@@ -15251,12 +15283,13 @@ var audio_stream_controller_AudioStreamController = /*#__PURE__*/function (_Base
                 frag: frag
               });
             } else {
-              logger["logger"].log("Loading " + frag.sn + ", cc: " + frag.cc + " of [" + trackDetails.startSN + " ," + trackDetails.endSN + "],track " + trackId + ", currentTime:" + pos + ",bufferEnd:" + bufferEnd.toFixed(3)); // only load if fragment is not loaded or if in audio switch
+              // only load if fragment is not loaded or if in audio switch
               // we force a frag loading in audio switch as fragment tracker might not have evicted previous frags in case of quick audio switch
-
               this.fragCurrent = frag;
 
               if (audioSwitch || this.fragmentTracker.getState(frag) === FragmentState.NOT_LOADED) {
+                logger["logger"].log("Loading " + frag.sn + ", cc: " + frag.cc + " of [" + trackDetails.startSN + " ," + trackDetails.endSN + "],track " + trackId + ", currentTime:" + pos + ",bufferEnd:" + bufferEnd.toFixed(3));
+
                 if (frag.sn !== 'initSegment') {
                   this.startFragRequested = true;
                 }
@@ -16512,7 +16545,7 @@ VTTParser.prototype = {
         line = collectNextLine(); // strip of UTF-8 BOM if any
         // https://en.wikipedia.org/wiki/Byte_order_mark#UTF-8
 
-        var m = line.match(/^(ï»¿)?WEBVTT([ \t].*)?$/);
+        var m = line.match(/^(茂禄驴)?WEBVTT([ \t].*)?$/);
 
         if (!m || !m[0]) {
           throw new Error('Malformed WebVTT signature.');
@@ -18681,7 +18714,11 @@ var timeline_controller_TimelineController = /*#__PURE__*/function (_EventHandle
   };
 
   _proto.createNonNativeTrack = function createNonNativeTrack(trackName) {
-    // Create a list of a single track for the provider to consume
+    if (this.nonNativeCaptionsTracks[trackName]) {
+      return;
+    } // Create a list of a single track for the provider to consume
+
+
     var trackProperties = this.captionsProperties[trackName];
 
     if (!trackProperties) {
@@ -19317,7 +19354,7 @@ var subtitle_track_controller_SubtitleTrackController = /*#__PURE__*/function (_
 
   _proto._onTextTracksChanged = function _onTextTracksChanged() {
     // Media is undefined when switching streams via loadSource()
-    if (!this.media) {
+    if (!this.media || !this.hls.config.renderTextTracksNatively) {
       return;
     }
 
@@ -20292,7 +20329,7 @@ function _defineProperty(obj, key, value) { if (key in obj) { Object.definePrope
 // If possible, keep hlsDefaultConfig shallow
 // It is cloned whenever a new Hls instance is created, by keeping the config
 // shallow the properties are cloned, and we don't end up manipulating the default
-var hlsDefaultConfig = _objectSpread({
+var hlsDefaultConfig = _objectSpread(_objectSpread({
   autoStartLoad: true,
   // used by stream-controller
   startPosition: -1,
@@ -20425,7 +20462,7 @@ var hlsDefaultConfig = _objectSpread({
   requestMediaKeySystemAccessFunc: requestMediaKeySystemAccess,
   // used by eme-controller
   testBandwidth: true
-}, timelineConfig(), {
+}, timelineConfig()), {}, {
   subtitleStreamController:  true ? subtitle_stream_controller_SubtitleStreamController : undefined,
   subtitleTrackController:  true ? subtitle_track_controller : undefined,
   timelineController:  true ? timeline_controller : undefined,
@@ -20517,7 +20554,7 @@ var hls_Hls = /*#__PURE__*/function (_Observer) {
      * @type {string}
      */
     get: function get() {
-      return "0.13.3-canary.5522";
+      return "0.14.0-beta.2";
     }
   }, {
     key: "Events",
@@ -20599,7 +20636,7 @@ var hls_Hls = /*#__PURE__*/function (_Observer) {
     } // Shallow clone
 
 
-    _this.config = hls_objectSpread({}, defaultConfig, {}, userConfig);
+    _this.config = hls_objectSpread(hls_objectSpread({}, defaultConfig), userConfig);
 
     var _assertThisInitialize = hls_assertThisInitialized(_this),
         config = _assertThisInitialize.config;
