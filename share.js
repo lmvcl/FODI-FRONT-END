@@ -1,6 +1,6 @@
 function crossdomainCheck() {
 	if (!hosts) return;
-	var referagent = window.location.href.split("?")[1];
+	var referagent = document.referrer;
 	if (redirecturl.indexOf("http") != 0)
 		redirecturl = "http://" + redirecturl
 	if (!referagent)
@@ -57,7 +57,7 @@ function play(main, xml) {
 	var hostname = window.location.hostname
 	var port = window.location.port || '80';
 	var picurl = window.location.protocol + "//" + window.location.host + pic;
-	var url = window.location.protocol + "//" + window.location.host + main
+	var url = main
 	xml = window.location.protocol + "//" + window.location.host + xml
 	var isiPad = navigator.userAgent.match(/iPhone|Linux|Android|iPod|ios|iOS|Windows Phone|Phone|WebOS/i) != null;
 	var iPad = navigator.userAgent.match(/iPad/i) != null;
