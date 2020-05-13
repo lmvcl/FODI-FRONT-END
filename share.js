@@ -1,6 +1,6 @@
 function crossdomainCheck() {
 	if (!hosts) return;
-	var referagent = document.referrer;
+	var referagent = window.location.href.split("?")[1];
 	if (redirecturl.indexOf("http") != 0)
 		redirecturl = "http://" + redirecturl
 	if (!referagent)
