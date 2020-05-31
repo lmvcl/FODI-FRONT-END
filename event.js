@@ -23,7 +23,7 @@ chrome.browserAction.onClicked.addListener(function (){
 chrome.extension.onMessage.addListener(function(request, sender, sendResponse) {
   // dispatch based on command
   if (request.command == 'playM3u8') {
-    var playerUrl = chrome.extension.getURL('player.html') + "#" + request.url
+    var playerUrl = chrome.extension.getURL('player.html') + "?" + request.url
     chrome.tabs.create({ url: playerUrl });
   }
 });
